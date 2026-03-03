@@ -223,43 +223,64 @@ configure_bootloader() {
 }
 
 configure_network() {
-	local gateway dev ip
+	local gateway dev ipv4 ipv6 ipv6_gw ipv6_mode
 
 	dev=$(ls /sys/class/net | grep -v lo)
-	if [ -n "$(ip -4 route show default | awk '{ print $3 }')" ]; then
-		gateway=$(ip -4 route show default | awk '{ print $3 }')
-		set -- $(ip addr show dev "$dev" | awk '($1 == "inet") { print $2 }')
-	else
-		gateway=$(ip -6 route show default | awk '{ print $3 }')
-		set -- $(ip addr show dev "$dev" | awk '($1 == "inet6" && $2 !~ /^fe80/) { print $2 }')
+
+	# IPv4 addresses and default gateway
+	gateway=$(ip -4 route show default | awk '{ print $3 }')
+	ipv4=$(ip addr show dev "$dev" | awk '($1 == "inet") { print $2 }')
+
+	# IPv6 global addresses (exclude link-local fe80::/10) and default gateway
+	ipv6=$(ip addr show dev "$dev" | awk '($1 == "inet6" && $2 !~ /^fe80/) { print $2 }')
+	ipv6_gw=$(ip -6 route show default | awk '{ print $3 }')
+
+	# Detect IPv6 mode: "dynamic" flag means SLAAC/DHCPv6 (auto), otherwise static
+	if [ -n "$ipv6" ]; then
+		if ip addr show dev "$dev" | grep -q 'inet6.*scope global.*dynamic'; then
+			ipv6_mode=auto
+		else
+			ipv6_mode=static
+		fi
 	fi
-	ip=$@
 
 	# FIXME Not supported for "P2P" interfaces, such as venet, yet
 	if [ "$network" = "systemd-networkd" ]; then
-		cat > /etc/systemd/network/default.network <<-EOF
-			[Match]
-			Name=$dev
-
-			[Network]
-			Gateway=$gateway
-		EOF
-		for ip in $ip; do
-			echo "Address=$ip"
-		done >> /etc/systemd/network/default.network
+		{
+			printf '[Match]\nName=%s\n\n[Network]\n' "$dev"
+			[ -n "$gateway" ] && echo "Gateway=$gateway"
+			for addr in $ipv4; do echo "Address=$addr"; done
+			case $ipv6_mode in
+			auto)
+				echo "IPv6AcceptRA=yes" ;;
+			static)
+				for addr in $ipv6; do echo "Address=$addr"; done
+				[ -n "$ipv6_gw" ] && echo "Gateway=$ipv6_gw" ;;
+			esac
+		} > /etc/systemd/network/default.network
 		systemctl enable systemd-networkd
 	elif [ "$network" = "netctl" ]; then
-		cat > /etc/netctl/default <<-EOF
-			Interface=$dev
-			Connection=ethernet
-			IP=static
-			Address=($ip)
-		EOF
-		if [ "$gateway" = "0.0.0.0" ]; then
-			echo 'Routes=(0.0.0.0/0)'
-		else
-			echo "Gateway=$gateway"
-		fi >> /etc/netctl/default
+		{
+			printf 'Interface=%s\nConnection=ethernet\n' "$dev"
+			if [ -n "$ipv4" ]; then
+				printf 'IP=static\nAddress=(%s)\n' "$ipv4"
+				if [ "$gateway" = "0.0.0.0" ]; then
+					echo 'Routes=(0.0.0.0/0)'
+				elif [ -n "$gateway" ]; then
+					echo "Gateway=$gateway"
+				fi
+			else
+				echo "IP=no"
+			fi
+			case $ipv6_mode in
+			auto)
+				echo "IP6=stateless" ;;
+			static)
+				echo "IP6=static"
+				printf 'Address6=(%s)\n' "$ipv6"
+				[ -n "$ipv6_gw" ] && echo "Gateway6=$ipv6_gw" ;;
+			esac
+		} > /etc/netctl/default
 		netctl enable default
 	fi
 
