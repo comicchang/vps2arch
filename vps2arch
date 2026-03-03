@@ -254,9 +254,15 @@ configure_network() {
 			auto)
 				echo "IPv6AcceptRA=yes" ;;
 			static)
-				for addr in $ipv6; do echo "Address=$addr"; done
-				[ -n "$ipv6_gw" ] && echo "Gateway=$ipv6_gw" ;;
+				for addr in $ipv6; do echo "Address=$addr"; done ;;
 			esac
+			# IPv6 default route via a dedicated [Route] section with GatewayOnLink=yes,
+			# because the IPv6 gateway is often outside the interface prefix (on-link).
+			# Using Gateway= in [Network] is unreliable in that case, and also breaks
+			# when forwarding=1 causes accept_ra to be forced to 0.
+			if [ "$ipv6_mode" = "static" ] && [ -n "$ipv6_gw" ]; then
+				printf '\n[Route]\nDestination=::/0\nGateway=%s\nGatewayOnLink=yes\nMetric=1024\n' "$ipv6_gw"
+			fi
 		} > /etc/systemd/network/default.network
 		systemctl enable systemd-networkd
 	elif [ "$network" = "netctl" ]; then
@@ -278,7 +284,9 @@ configure_network() {
 			static)
 				echo "IP6=static"
 				printf 'Address6=(%s)\n' "$ipv6"
-				[ -n "$ipv6_gw" ] && echo "Gateway6=$ipv6_gw" ;;
+				# Use ExecUpPost to add the default IPv6 route with onlink flag,
+				# since Gateway6= does not set onlink and fails for off-link gateways.
+				[ -n "$ipv6_gw" ] && printf "ExecUpPost='ip -6 route add default via %s dev %s onlink metric 1024'\n" "$ipv6_gw" "$dev" ;;
 			esac
 		} > /etc/netctl/default
 		netctl enable default
